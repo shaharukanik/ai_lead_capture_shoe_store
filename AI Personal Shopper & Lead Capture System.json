@@ -1,0 +1,411 @@
+{
+  "name": "AI Personal Shopper & Lead Capture System",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "your-webhook-path-here",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -2368,
+        -608
+      ],
+      "id": "55ebe667-0d65-4011-bd49-c0e26fa830e1",
+      "name": "Receive Lead (Tally Form)",
+      "webhookId": "your-webhook-id-here"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_PRODUCTS_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Products",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_PRODUCTS_SHEET_ID/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 0,
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_PRODUCTS_SHEET_ID/edit#gid=0"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -2144,
+        -608
+      ],
+      "id": "ccdb5300-fb0d-40e1-a106-d0711aba804b",
+      "name": "Load Product Catalog"
+    },
+    {
+      "parameters": {
+        "jsCode": "const wh = $('Receive Lead (Tally Form)').first().json.body.data.fields;\n\nconst gender = wh[3].options.find(o => o.id === wh[3].value[0]).text;\nconst category = wh[4].options.find(o => o.id === wh[4].value[0]).text;\nconst budget = wh[5].options.find(o => o.id === wh[5].value[0]).text;\nconst size = wh[6].value;\nconst color = wh[7].value;\n\nfunction parseBudget(str) {\n  const nums = str.match(/\\d+/g)?.map(Number) || [];\n  if (/under/i.test(str)) return { min: 0, max: nums[0] || 75 };\n  if (/above/i.test(str)) return { min: nums[0] || 200, max: 99999 };\n  if (nums.length >= 2) return { min: nums[0], max: nums[1] };\n  return { min: 0, max: 99999 };\n}\n\nconst { min, max } = parseBudget(budget);\nconst midpoint = (min + max) / 2;\n\nconst allProducts = $('Load Product Catalog').all().map(item => item.json);\n\nconst candidates = allProducts.filter(p =>\n  String(p['Gender']).toLowerCase() === gender.toLowerCase() &&\n  String(p['Category']).toLowerCase() === category.toLowerCase()\n);\n\nlet inBudget = candidates.filter(p => Number(p['Price']) >= min && Number(p['Price']) <= max);\nlet outBudget = candidates.filter(p => Number(p['Price']) < min || Number(p['Price']) > max);\n\ninBudget.sort((a, b) => Math.abs(Number(a['Price']) - midpoint) - Math.abs(Number(b['Price']) - midpoint));\noutBudget.sort((a, b) => Math.abs(Number(a['Price']) - midpoint) - Math.abs(Number(b['Price']) - midpoint));\n\nconst matched = inBudget.concat(outBudget).slice(0, 3);\n\nconst productListText = matched.map(p =>\n  `${p['Product Name']} | ${p['Brand']} | $${p['Price']} | Colors: ${p['Colors Available']}`\n).join('\\n');\n\nconst cleanProductNames = matched.map(p => p['Product Name']).join(', ');\n\nreturn [{ json: { gender, category, budget, size, color, matched_products_text: productListText, clean_product_names: cleanProductNames } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1920,
+        -608
+      ],
+      "id": "c0222eb4-6dc3-4018-b53d-8cb94e2db67c",
+      "name": "Match Products to Lead"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  \"model\": \"llama3.2\",\n  \"stream\": false,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an AI personal shopper for a shoe store. Use the given matched products exactly as provided - never invent or rename products.\\n\\nSCORE THE LEAD STRICTLY:\\nHOT = Budget above $150 AND size provided AND color provided\\nWARM = Budget $100-$150, OR only some details provided\\nCOLD = Budget under $100, OR size missing, OR vague request\\n\\nFor EMAIL_BODY: write ONLY 2-3 sentences recommending the products. No greeting (Dear/Hi), no signature (Best regards/Your Name).\\n\\nAlways output all 4 fields, never skip any:\\nLEAD_SCORE: (one word: HOT, WARM, or COLD)\\nTOP_PRODUCTS: (the exact product names given)\\nEMAIL_SUBJECT: (short subject line)\\nEMAIL_BODY: (recommendation only, no greeting or signature)\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Matched Products:\\n\" + $json.matched_products_text + \"\\n\\nCustomer:\\nGender: \" + $json.gender + \"\\nCategory: \" + $json.category + \"\\nBudget: \" + $json.budget + \"\\nSize: \" + $json.size + \"\\nColor: \" + $json.color\n    }\n  ]\n}) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1696,
+        -608
+      ],
+      "id": "f252cdca-28e3-4c26-a208-e5b05f3eace0",
+      "name": "AI Generate Score + Email"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = items[0].json.message.content;\n\nconst scoreMatch = response.match(/LEAD_SCORE:\\s*(\\w+)/i);\nconst subjectLineMatch = response.match(/EMAIL[\\s_]SUBJECT:\\s*(.*)/i);\n\nconst bodyRegex = /EMAIL[\\s_]BODY:/gi;\nlet lastIndex = -1, match;\nwhile ((match = bodyRegex.exec(response)) !== null) {\n  lastIndex = match.index + match[0].length;\n}\n\nconst lead_score = scoreMatch ? scoreMatch[1].trim().toUpperCase() : 'WARM';\nconst top_products = $('Match Products to Lead').first().json.clean_product_names;\nconst email_subject = subjectLineMatch ? subjectLineMatch[1].trim().replace(/^[\"']|[\"']$/g, '') : 'Your Personalized Shoe Picks';\n\nlet raw_body = lastIndex !== -1 ? response.slice(lastIndex).trim() : '';\nif (!raw_body) raw_body = `Based on your preferences, here are our top picks: ${top_products}.`;\n\nraw_body = raw_body.replace(/^(Dear|Hi|Hello|Hey)\\b[^.!?\\n]{0,30}[.!?]\\s*/i, '');\nraw_body = raw_body.replace(/\\n*\\b(Best regards|Sincerely|Warm regards)\\b[\\s\\S]*$/i, '').trim();\n\nconst cleaned = raw_body\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/\\n{2,}/g, '\\n\\n')\n  .split('\\n\\n')\n  .map(p => p.replace(/\\n/g, ' ').replace(/\\s+/g, ' ').trim())\n  .filter(p => p.length > 0)\n  .join('<br><br>');\n\nconst finalCleaned = cleaned.replace(/,(?!\\s)/g, ', ');\nconst customerName = $('Receive Lead (Tally Form)').first().json.body.data.fields[0].value;\nconst companyName = 'StrideWell Footwear';\n\nconst email_body = `Hi ${customerName},<br><br>${finalCleaned}<br><br>Best regards,<br>${companyName} Team`;\n\nreturn [{ json: { lead_score, top_products, email_subject, email_body } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1472,
+        -608
+      ],
+      "id": "9e4fcd93-0a9e-45de-8d18-6649a3bdf270",
+      "name": "Parse AI Response"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_LEADS_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_LEADS_SHEET_ID/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_LEADS_SHEET_ID/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Name": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[0].value }}",
+            "Email": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[1].value }}",
+            "Phone": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[2].value }}",
+            "Date": "={{ $now.toFormat('MM/dd/yyyy') }}",
+            "Gender": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[3].options.find(o => o.id === $('Receive Lead (Tally Form)').item.json.body.data.fields[3].value[0]).text }}",
+            "Category": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[4].options.find(o => o.id === $('Receive Lead (Tally Form)').item.json.body.data.fields[4].value[0]).text }}",
+            "Budget": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[5].options.find(o => o.id === $('Receive Lead (Tally Form)').item.json.body.data.fields[5].value[0]).text }}",
+            "Size": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[6].value }}",
+            "Color": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[7].value }}",
+            "Lead Score": "={{ $json.lead_score }}",
+            "Lead Status": "New",
+            "Top Products": "={{ $json.top_products }}",
+            "Email Sent": "Yes",
+            "Follow Up 1": "No",
+            "Follow Up 2": "No"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "Name", "displayName": "Name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Email", "displayName": "Email", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Phone", "displayName": "Phone", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Gender", "displayName": "Gender", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Category", "displayName": "Category", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Budget", "displayName": "Budget", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Size", "displayName": "Size", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Color", "displayName": "Color", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Lead Score", "displayName": "Lead Score", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Lead Status", "displayName": "Lead Status", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Top Products", "displayName": "Top Products", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Email Sent", "displayName": "Email Sent", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Follow Up 1", "displayName": "Follow Up 1", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Follow Up 2", "displayName": "Follow Up 2", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Date", "displayName": "Date", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -1248,
+        -608
+      ],
+      "id": "6f1362a7-2992-413f-a442-90a2d85f652d",
+      "name": "Save Lead to CRM"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[1].value }}",
+        "subject": "={{ $('Parse AI Response').item.json.email_subject }}",
+        "message": "={{ $('Parse AI Response').item.json.email_body }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -1024,
+        -608
+      ],
+      "id": "b1ac50c2-b9dd-4297-bb70-6765cef79fdf",
+      "name": "Send Personalized Email",
+      "webhookId": "your-webhook-id-here"
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_SLACK_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "your-channel-name"
+        },
+        "text": "=🔔 New Lead Alert!  Name: {{ $('Receive Lead (Tally Form)').item.json.body.data.fields[0].value }} Score: {{ $('Parse AI Response').item.json.lead_score }} Category: {{ $('Receive Lead (Tally Form)').item.json.body.data.fields[4].options.find(o => o.id === $('Receive Lead (Tally Form)').item.json.body.data.fields[4].value[0]).text }} Budget: {{ $('Receive Lead (Tally Form)').item.json.body.data.fields[5].options.find(o => o.id === $('Receive Lead (Tally Form)').item.json.body.data.fields[5].value[0]).text }}  Check CRM for full details 📊",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.5,
+      "position": [
+        -800,
+        -608
+      ],
+      "id": "59f3e72e-8331-49d9-8363-62ad359144be",
+      "name": "Alert Owner (Slack)",
+      "webhookId": "your-webhook-id-here"
+    },
+    {
+      "parameters": {
+        "amount": 24,
+        "unit": "hours"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -576,
+        -608
+      ],
+      "id": "c75807a3-e1e0-4efd-b33a-3e3857f2d6ce",
+      "name": "Wait 24h",
+      "webhookId": "your-webhook-id-here"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[1].value }}",
+        "subject": "Still thinking about your shoes?",
+        "message": "=Hi {{ $('Receive Lead (Tally Form)').item.json.body.data.fields[0].value }},\n\n<br><br>Just checking in! We saved your top picks for you: {{ $('Parse AI Response').item.json.top_products }}<br><br>Let us know if you have any questions — we're happy to help!<br><br>Best regards,<br>The StrideWell Footwear Team",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -352,
+        -608
+      ],
+      "id": "47acc8b9-8781-42d7-880e-d2f76b6720c5",
+      "name": "Send Follow-Up Email 1",
+      "webhookId": "your-webhook-id-here"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_LEADS_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_LEADS_SHEET_ID/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_LEADS_SHEET_ID/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Email": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[1].value }}",
+            "Follow Up 1": "Yes"
+          },
+          "matchingColumns": ["Email"],
+          "schema": [
+            { "id": "Name", "displayName": "Name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Email", "displayName": "Email", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Phone", "displayName": "Phone", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Gender", "displayName": "Gender", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Category", "displayName": "Category", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Budget", "displayName": "Budget", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Size", "displayName": "Size", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Color", "displayName": "Color", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Lead Score", "displayName": "Lead Score", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Lead Status", "displayName": "Lead Status", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Top Products", "displayName": "Top Products", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Email Sent", "displayName": "Email Sent", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Follow Up 1", "displayName": "Follow Up 1", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Follow Up 2", "displayName": "Follow Up 2", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Date", "displayName": "Date", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "row_number", "displayName": "row_number", "required": false, "defaultMatch": false, "display": true, "type": "number", "canBeUsedToMatch": true, "readOnly": true, "removed": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -128,
+        -608
+      ],
+      "id": "333299d0-ee3e-408f-84c3-f241a8ea2c40",
+      "name": "Mark Follow-Up 1 Sent"
+    },
+    {
+      "parameters": {
+        "amount": 24,
+        "unit": "hours"
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        96,
+        -608
+      ],
+      "id": "7929ef27-ac9f-4d4a-8a47-13d0d6f36402",
+      "name": "Wait 24h (Final)",
+      "webhookId": "your-webhook-id-here"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[1].value }}",
+        "subject": "Last chance — 10% off your shoes!",
+        "message": "=Hi {{ $('Receive Lead (Tally Form)').item.json.body.data.fields[0].value }},<br><br>This is your final reminder! Your top picks ({{ $('Parse AI Response').item.json.top_products }}) are still waiting for you.<br><br>Use code <strong>SHOE10</strong> for 10% off — today only!<br><br>Best regards,<br>The StrideWell Footwear Team",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        320,
+        -608
+      ],
+      "id": "7658ad0c-20be-4577-9995-e45edd90ccec",
+      "name": "Send Follow-Up Email 2",
+      "webhookId": "your-webhook-id-here"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_LEADS_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_LEADS_SHEET_ID/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_LEADS_SHEET_ID/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Email": "={{ $('Receive Lead (Tally Form)').item.json.body.data.fields[1].value }}",
+            "Follow Up 2": "Yes"
+          },
+          "matchingColumns": ["Email"],
+          "schema": [
+            { "id": "Name", "displayName": "Name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Email", "displayName": "Email", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Phone", "displayName": "Phone", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Gender", "displayName": "Gender", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Category", "displayName": "Category", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Budget", "displayName": "Budget", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Size", "displayName": "Size", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Color", "displayName": "Color", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Lead Score", "displayName": "Lead Score", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Lead Status", "displayName": "Lead Status", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Top Products", "displayName": "Top Products", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Email Sent", "displayName": "Email Sent", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Follow Up 1", "displayName": "Follow Up 1", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Follow Up 2", "displayName": "Follow Up 2", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Date", "displayName": "Date", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "row_number", "displayName": "row_number", "required": false, "defaultMatch": false, "display": true, "type": "number", "canBeUsedToMatch": true, "readOnly": true, "removed": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        544,
+        -608
+      ],
+      "id": "eb5f6e22-3c26-4a1e-8fb9-14bf0cb65e57",
+      "name": "Mark Follow-Up 2 Sent"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Receive Lead (Tally Form)": { "main": [[{ "node": "Load Product Catalog", "type": "main", "index": 0 }]] },
+    "Load Product Catalog": { "main": [[{ "node": "Match Products to Lead", "type": "main", "index": 0 }]] },
+    "Match Products to Lead": { "main": [[{ "node": "AI Generate Score + Email", "type": "main", "index": 0 }]] },
+    "AI Generate Score + Email": { "main": [[{ "node": "Parse AI Response", "type": "main", "index": 0 }]] },
+    "Parse AI Response": { "main": [[{ "node": "Save Lead to CRM", "type": "main", "index": 0 }]] },
+    "Save Lead to CRM": { "main": [[{ "node": "Send Personalized Email", "type": "main", "index": 0 }]] },
+    "Send Personalized Email": { "main": [[{ "node": "Alert Owner (Slack)", "type": "main", "index": 0 }]] },
+    "Alert Owner (Slack)": { "main": [[{ "node": "Wait 24h", "type": "main", "index": 0 }]] },
+    "Wait 24h": { "main": [[{ "node": "Send Follow-Up Email 1", "type": "main", "index": 0 }]] },
+    "Send Follow-Up Email 1": { "main": [[{ "node": "Mark Follow-Up 1 Sent", "type": "main", "index": 0 }]] },
+    "Mark Follow-Up 1 Sent": { "main": [[{ "node": "Wait 24h (Final)", "type": "main", "index": 0 }]] },
+    "Wait 24h (Final)": { "main": [[{ "node": "Send Follow-Up Email 2", "type": "main", "index": 0 }]] },
+    "Send Follow-Up Email 2": { "main": [[{ "node": "Mark Follow-Up 2 Sent", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "af5f6c44-0e0a-4e0c-8157-fdae9674d8e7",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "nodeGroups": [],
+  "id": "Yh3pOgI7Cbhjk1AQ",
+  "tags": []
+}
